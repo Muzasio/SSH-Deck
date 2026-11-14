@@ -13,7 +13,7 @@ from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
 from . import core
 from .devicetab import DeviceTab
 from .dialogs import DeviceDialog, SettingsDialog
-from .theme import (CHECK_HELP, PILL, button, dot_icon, fp_text, guess_prefix, label,
+from .theme import (CHECK_HELP, PILL, button, dot_icon, fp_text, gear_icon, guess_prefix, label,
                     local_paths, make_qss, more_button, repolish)
 
 
@@ -148,6 +148,11 @@ class MainWindow(QtWidgets.QMainWindow):
         add = button("+  Add device", True, "Ctrl+N")
         add.clicked.connect(self.add_device)
         menu_b = more_button("Settings and key")
+        menu_b.setObjectName("gear")
+        menu_b.setText("")
+        menu_b.setIcon(gear_icon(self.palette().color(QtGui.QPalette.ButtonText)))
+        menu_b.setIconSize(QtCore.QSize(18, 18))
+        menu_b.setAccessibleName("Settings")
         m = menu_b.menu()
         m.addAction("Settings…", self.open_settings)
         m.addSeparator()

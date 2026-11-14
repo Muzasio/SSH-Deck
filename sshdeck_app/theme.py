@@ -34,7 +34,10 @@ QPushButton#seg[pos="right"] { border-top-right-radius: 8px; border-bottom-right
     border-left: none; }
 QPushButton#seg:checked { background: palette(highlight); color: palette(highlighted-text);
     border-color: palette(highlight); font-weight: 600; }
-QToolButton#more::menu-indicator { image: none; width: 0; }
+QToolButton#more::menu-indicator, QToolButton#gear::menu-indicator { image: none; width: 0; }
+QToolButton#gear { padding: 6px 10px; border-radius: 8px; border: 1px solid @line;
+    background: palette(button); }
+QToolButton#gear:hover { border-color: palette(highlight); }
 QToolButton#x { border: none; padding: 2px 6px; border-radius: 6px; }
 QToolButton#x:hover { background: @tint; }
 QLineEdit { padding: 6px 9px; border-radius: 8px; border: 1px solid @line;
@@ -138,6 +141,34 @@ def more_button(tip: str = "More") -> QtWidgets.QToolButton:
     more.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     more.setMenu(QtWidgets.QMenu(more))
     return more
+
+
+def gear_icon(color: QtGui.QColor, size: int = 18) -> QtGui.QIcon:
+    """A settings gear drawn in code: sharp at any scale, follows the theme colour."""
+    import math
+    icon = QtGui.QIcon()
+    for px in (size, size * 2, size * 3):  # plain sizes; Qt picks the best match
+        pm = QtGui.QPixmap(px, px)
+        pm.fill(QtCore.Qt.transparent)
+        p = QtGui.QPainter(pm)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        c = px / 2
+        teeth, r_out, r_in, r_hole = 8, px * 0.48, px * 0.37, px * 0.17
+        pts = []
+        for i in range(teeth):
+            a = 2 * math.pi * i / teeth
+            half = math.pi / teeth  # flat-topped teeth
+            for ang, rad in ((a - half * 0.95, r_in), (a - half * 0.5, r_out),
+                             (a + half * 0.5, r_out), (a + half * 0.95, r_in)):
+                pts.append(QtCore.QPointF(c + rad * math.cos(ang), c + rad * math.sin(ang)))
+        body = QtGui.QPainterPath()
+        body.addPolygon(QtGui.QPolygonF(pts + pts[:1]))
+        hole = QtGui.QPainterPath()
+        hole.addEllipse(QtCore.QPointF(c, c), r_hole, r_hole)
+        p.fillPath(body.subtracted(hole), color)
+        p.end()
+        icon.addPixmap(pm)
+    return icon
 
 
 def repolish(w: QtWidgets.QWidget):
