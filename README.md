@@ -85,8 +85,8 @@ flowchart LR
 
 **2. Get the code**
 ```bash
-git clone https://github.com/Muzasio/ssh-deck.git
-cd ssh-deck
+git clone https://github.com/Muzasio/SSH-Deck.git
+cd SSH-Deck
 ```
 
 **3. Python dependency**
@@ -117,7 +117,7 @@ Then in SSH Deck: **+ Add device**, fill in name, IP, user and the password once
    ```bash
    rm ~/.local/share/applications/sshdeck.desktop
    rm -r ~/.config/sshdeck
-   rm -r ssh-deck         # the cloned folder
+   rm -r SSH-Deck         # the cloned folder
    ```
 3. Only if you used "Browse in file manager": remove the two `SSH Deck` lines at the top of `~/.ssh/config` (a backup `config.bak-sshdeck-<date>` sits next to it).
 
