@@ -53,6 +53,7 @@ DEFAULT_SETTINGS = {
     "trust_cache_seconds": 120,
     "unlock_minutes": 60,
     "download_dir": "~/Downloads",
+    "speed_limit_mb_s": 0,
     "junk": ["__pycache__", "*.pyc", ".git", "node_modules", ".venv", "venv",
              ".mypy_cache", ".pytest_cache", ".DS_Store", "Thumbs.db"],
 }
@@ -190,11 +191,21 @@ def load_settings() -> dict:
     v = data.get("download_dir")
     if isinstance(v, str) and v.strip() and "\n" not in v:
         s["download_dir"] = v
+    v = data.get("speed_limit_mb_s")
+    if type(v) in (int, float) and 0 <= v <= 10_000:
+        s["speed_limit_mb_s"] = v
     if _good_patterns(data.get("junk")):
         s["junk"] = data["junk"]
     if s != data:  # write missing keys back so the file shows every setting
         write_private(SETTINGS_FILE, json.dumps(s, indent=2) + "\n")
     return s
+
+
+def save_settings(new: dict) -> dict:
+    """Write settings, then read them back through the same checks as at start.
+    Returns what is really in effect (bad values become defaults)."""
+    write_private(SETTINGS_FILE, json.dumps(new, indent=2) + "\n")
+    return load_settings()
 
 
 def load_hosts() -> list[dict]:
@@ -524,6 +535,10 @@ def remove_key_from_device(d: dict, timeout: int) -> tuple[bool, str]:
         got = tmp / "authorized_keys"
         r = sftp_batch(d, [f"get .ssh/authorized_keys {sftp_escape(str(got))}"], timeout)
         if r.returncode != 0 or not got.exists():
+            if "not found" in r.stderr.lower() or "no such file" in r.stderr.lower():
+                return False, ("~/.ssh/authorized_keys does not exist on the device.\n"
+                               "If it keeps keys in another place (AuthorizedKeysFile in its "
+                               "sshd_config), remove the line that ends with “sshdeck” there.")
             return False, "Could not read ~/.ssh/authorized_keys on the device.\n" + \
                 r.stderr.strip()[-300:]
         new, removed = strip_our_key(got.read_text(encoding="utf-8", errors="replace"),

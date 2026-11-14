@@ -32,17 +32,19 @@ Using SSH by hand means typing `user@ip`, copying keys, fixing "REMOTE HOST IDEN
 
 ## Features
 
-- **Device list**: name, IP, user, port; online dot; the IP field starts with your network's first part (e.g. `192.168.1.`).
+- **Device list**: name, IP, user, port; online dot; search box (name, user or IP); the IP field starts with your network's first part (e.g. `192.168.1.`).
 - **One-time key setup**: type the password once; SSH Deck installs its own key, limited to terminal and file transfer (`restrict,pty`). The password is never saved or put on the command line.
 - **Host key check**: fingerprint box on first connect and when a key changes; one known_hosts file per device, so an old device on the same IP never clashes.
 - **Tabs per device**: Send page (drop zone) and Device files page (browse, new folder, download, "send here").
 - **Safe transfers over sftp only**: no remote shell, so names with spaces, quotes, `$()` or `*` arrive exactly as they are.
 - **Send box before every send**: file count, size, free space on the device, skip junk (`__pycache__`, `.git`, `node_modules`…), links skipped unless you choose, warnings for private keys and secrets.
-- **Resume**: skips files that are already complete on the device; half-sent or changed files are sent again in full.
+- **Resume both ways**: sending and downloading skip files that are already complete (same size and time); half-sent or changed files are transferred again in full.
+- **Speed limit**: keep the network usable during big transfers (MB/s, for both directions).
 - **Checks**: free space before sending and downloading, file sizes after sending, cancel at any time.
 - **Remove key from device**: takes only SSH Deck's line out of `authorized_keys`.
 - **Optional passphrase**: asked once per session, kept only while SSH Deck runs.
-- **Desktop friendly**: app menu entry and icon, light and dark themes, notifications, shortcuts (Ctrl+N, Ctrl+W, Ctrl+O, Ctrl+T, F5).
+- **Settings window**: online check, timeouts, speed limit, download folder, junk names, terminal and file manager, with checks before saving.
+- **Desktop friendly**: app menu entry and icon, light and dark themes, notifications, shortcuts (Ctrl+N, Ctrl+F, Ctrl+W, Ctrl+O, Ctrl+T, Ctrl+comma, F5).
 
 ## How it works
 
@@ -121,7 +123,7 @@ Then in SSH Deck: **+ Add device**, fill in name, IP, user and the password once
 
 ## Settings
 
-`~/.config/sshdeck/settings.json` (open it from **⋯ → Open settings file**). Wrong values fall back to the defaults.
+Open **⋯ → Settings…** (Ctrl+comma). Everything is saved in `~/.config/sshdeck/settings.json`; wrong values fall back to the defaults.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -132,16 +134,18 @@ Then in SSH Deck: **+ Add device**, fill in name, IP, user and the password once
 | `trust_cache_seconds` | `120` | Time before the device key is checked again |
 | `unlock_minutes` | `60` | How long a passphrase-protected key stays unlocked |
 | `download_dir` | `~/Downloads` | First folder shown when downloading |
+| `speed_limit_mb_s` | `0` | Speed limit for sending and downloading in MB/s (0 = no limit) |
 | `junk` | `__pycache__`, `*.pyc`, `.git`, `node_modules`, `.venv`, … | Names skipped when "Skip junk" is on |
 
 Data lives in `~/.config/sshdeck/` (folder `700`, files `600`): device list, settings, generated `ssh_config`, one `known_hosts` file per device and SSH Deck's own key.
 
 ## Known limits
 
-- **Resume** compares size and modified time **to the minute** (sftp shows no seconds). A file changed within the same minute with the same size counts as complete.
+- **Resume** compares size and modified time **to the minute** (sftp shows no seconds). A file changed within the same minute with the same size counts as complete. Files transferred by older versions have no kept time, so they are sent once more.
 - Half-sent files are sent again from the start (never appended, so a different file can't be corrupted).
 - Size check after sending runs for up to 5,000 files; bigger sends are not checked file by file.
-- Download progress for folders shows files and speed, not a percentage (sizes are not known in advance).
+- Links are never followed when downloading, and nothing is written through a link on this PC.
+- "Remove key from device" works on `~/.ssh/authorized_keys`; devices that keep keys elsewhere (`AuthorizedKeysFile`) need the line removed by hand.
 - Free space shows "unknown" on servers without the sftp `statvfs` extension (some Windows servers).
 - Links to folders are never sent; links to files only when you tick the box.
 - Windows devices: key setup for administrator accounts needs `administrators_authorized_keys` (not handled).
@@ -165,7 +169,7 @@ Data lives in `~/.config/sshdeck/` (folder `700`, files `600`): device list, set
 
 **Tested**
 - CachyOS (Arch), KDE Plasma 6 on Wayland, Python 3.14, PySide6 6.12, OpenSSH 10.6: app start, menu entry, device tab, sending a folder to a second CachyOS laptop (earlier version of the transfer code).
-- Test suite (`python3 -I tests/test_security.py`): 63 tests against a local test SSH server in a sandbox home (input checks, config injection, file permissions, host keys, password handling, key limits, key removal, passphrase agent, scan rules, uploads, downloads, resume, free space, cancel, GUI flow). Also passed on the laptop (earlier 59-test version).
+- Test suite (`python3 -I tests/test_security.py`): 69 tests against a local test SSH server with its own fake home folder (input checks, config injection, file permissions, host keys, password handling, key limits, key removal, passphrase agent, scan rules, uploads, downloads, resume both ways, `~` paths, speed limit, free space, cancel, settings, search, GUI flow). Also passed on the laptop (earlier 59-test version).
 - Quick start on a fresh clone with a sandbox home (Arch path): clone, run, menu entry created, tests, remove.
 - Code parses with the Python 3.9 grammar (runtime tested on 3.14 only).
 

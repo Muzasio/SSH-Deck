@@ -40,6 +40,7 @@ s.resolve_bins()
 s.BIN["notify-send"] = ""  # tests never pop up real desktop notifications
 SSHD = shutil.which("sshd") or "/usr/bin/sshd"
 SRV = SANDBOX / "srv"
+RHOME = SANDBOX / "rhome"  # the device's "~" for sftp (sftp-server -d), never the real home
 PASSWORD = 'Zx9!pa ss"wo$(id)`id`;rd'  # nasty characters on purpose
 
 
@@ -104,12 +105,13 @@ APP = None
 def setUpModule():
     global APP
     SRV.mkdir()
+    RHOME.mkdir()
     new_host_key()
     (SRV / "sshd_config").write_text(
         f"Port {PORT}\nListenAddress 127.0.0.1\nHostKey {SRV}/hostkey\nPidFile {SRV}/pid\n"
         f"AuthorizedKeysFile {SRV}/authorized_keys\nUsePAM no\nStrictModes no\n"
         "PasswordAuthentication yes\nKbdInteractiveAuthentication no\n"
-        "PerSourcePenalties no\nSubsystem sftp /usr/lib/ssh/sftp-server\n")
+        f"PerSourcePenalties no\nSubsystem sftp /usr/lib/ssh/sftp-server -d {RHOME}\n")
     start_sshd()
     os.umask(0o077)
     s.ensure_dirs()
@@ -461,17 +463,11 @@ class PasswordAndKeys(unittest.TestCase):
         The batch runs with a 'cd' into a sandbox home that has its own .ssh."""
         trust()
         authorize()
-        fake_home = SANDBOX / "fakehome"
+        fake_home = RHOME  # sftp starts here, so ".ssh/authorized_keys" is this one
         (fake_home / ".ssh").mkdir(parents=True, exist_ok=True)
         ak = fake_home / ".ssh/authorized_keys"
         shutil.copy(SRV / "authorized_keys", ak)
-        real = s.sftp_batch
-
-        def in_fake_home(d, lines, timeout):
-            return real(d, [f"cd {tr.sftp_escape(str(fake_home))}"] + lines, timeout)
-
-        with mock.patch.object(s, "sftp_batch", side_effect=in_fake_home), \
-                mock.patch.object(s, "test_key", return_value=(False, "")):
+        with mock.patch.object(s, "test_key", return_value=(False, "")):
             ok, msg = s.remove_key_from_device(DEV, 5)
         self.assertTrue(ok, msg)
         text = ak.read_text()
@@ -481,6 +477,11 @@ class PasswordAndKeys(unittest.TestCase):
         self.assertIn("# a comment line", text)
         self.assertEqual(mode(ak), 0o600)
         self.assertFalse((fake_home / ".ssh/authorized_keys.sshdeck-new").exists())
+        ak.unlink()
+        with mock.patch.object(s, "test_key", return_value=(False, "")):
+            ok, msg = s.remove_key_from_device(DEV, 5)
+        self.assertFalse(ok)
+        self.assertIn("AuthorizedKeysFile", msg, "clear message when keys live elsewhere")
 
     def test_passphrase_key_with_agent(self):
         """Encrypt the key, unlock it once in SSH Deck's own agent, use it with BatchMode."""
@@ -606,12 +607,20 @@ class ScanAndPlan(unittest.TestCase):
         self.assertIn("not found", f(['stat /x: No such file or directory'], 1))
         self.assertIn("reach", f(["ssh: connect to host x port 22: Connection refused"], 255))
 
-    def test_download_plan_rejects_bad_names(self):
-        with self.assertRaises(ValueError):
-            tr.plan_download([{"name": "../evil", "path": "x", "dir": False, "size": 1}], "/tmp")
-        p = tr.plan_download([{"name": "a b", "path": "/r/a b", "dir": True, "size": 0}], "/l")
-        self.assertEqual(p["lines"][1], "get -R /r/a\\ b /l/a\\ b")
-        self.assertFalse(p["known"])
+    def test_download_plan_rules(self):
+        base = SANDBOX / "dlplan"
+        (base / "real").mkdir(parents=True)
+        (base / "linked").symlink_to(SANDBOX)  # a link on this PC must not be written through
+        tree = {"dirs": ["real", "linked"], "counts": {},
+                "files": [("real/a b.txt", "/r/real/a b.txt", 5, "Jan  1  2020"),
+                          ("linked/x.txt", "/r/linked/x.txt", 5, "Jan  1  2020")]}
+        p = tr.plan_download(tree, str(base), False)
+        self.assertEqual(p["lines"], ["progress", f"get -p /r/real/a\\ b.txt "
+                                      f"{tr.sftp_escape(str(base / 'real/a b.txt'))}"])
+        self.assertEqual(p["stats"]["unsafe"], 2)
+        self.assertEqual(p["sizes"], [5])
+        self.assertEqual(tr.limit_kbit(0), 0)
+        self.assertEqual(tr.limit_kbit(1), 8192)
 
 
 # ------------------------------------------------------------------ live transfers
@@ -726,22 +735,99 @@ class TransferLive(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("not found", msg.lower())
 
+    def download(self, rsrc, local, resume=False):
+        ok, entries = tr.list_remote(DEV, str(rsrc), 5)
+        self.assertTrue(ok, entries)
+        tree = tr.remote_tree(DEV, entries, 5)
+        plan = tr.plan_download(tree, str(local), resume)
+        for path in plan["mkdirs"]:
+            os.makedirs(path, exist_ok=True)
+        ok, msg, prog, _ = run_job(plan["lines"], plan["sizes"])
+        return ok, msg, prog, plan, tree
+
     def test_download_file_and_folder(self):
         rsrc = self.remote / "dl"
-        (rsrc / "inner").mkdir(parents=True)
+        (rsrc / "inner/deeper").mkdir(parents=True)
         (rsrc / "inner/i.bin").write_bytes(os.urandom(70_000))
+        (rsrc / "inner/deeper/d $(x) #1.txt").write_bytes(os.urandom(3000))
         (rsrc / "f q'#.txt").write_bytes(os.urandom(5000))
+        (rsrc / "inner/ln").symlink_to("/etc/hostname")
+        os.utime(rsrc / "f q'#.txt", (1_650_000_000, 1_650_000_000))
         local = SANDBOX / "downloads"
         local.mkdir()
-        ok, entries = tr.list_remote(DEV, str(rsrc), 5)
-        self.assertTrue(ok)
-        plan = tr.plan_download(entries, str(local))
-        ok, msg, prog, _ = run_job(plan["lines"],
-                                   plan["sizes"] if plan["known"] else [0] * len(plan["sizes"]))
+        ok, msg, prog, plan, tree = self.download(rsrc, local)
         self.assertTrue(ok, msg)
-        self.assertEqual(sha(local / "f q'#.txt"), sha(rsrc / "f q'#.txt"))
-        self.assertEqual(sha(local / "inner/i.bin"), sha(rsrc / "inner/i.bin"))
+        self.assertEqual(tree["counts"]["links"], 1, "device links are not followed")
+        self.assertFalse((local / "inner/ln").exists())
+        for rel in ("f q'#.txt", "inner/i.bin", "inner/deeper/d $(x) #1.txt"):
+            self.assertEqual(sha(local / rel), sha(rsrc / rel), rel)
+        self.assertEqual(int((local / "f q'#.txt").stat().st_mtime), 1_650_000_000, "get -p")
         self.assertEqual(mode(local / "inner/i.bin") & 0o077, 0, "umask 077 on downloads")
+        self.assertEqual(prog[-1][0], 1.0, "exact progress: sizes known")
+        self.assertEqual(prog[-1][1], 3)
+
+    def test_download_resume(self):
+        rsrc = self.remote / "dlres"
+        rsrc.mkdir()
+        for i in range(5):
+            (rsrc / f"r{i}.bin").write_bytes(os.urandom(30_000))
+        local = SANDBOX / "dlres-local"
+        local.mkdir()
+        ok, msg, _, _, _ = self.download(rsrc, local)
+        self.assertTrue(ok, msg)
+        (local / "r0.bin").unlink()
+        with open(local / "r1.bin", "r+b") as fh:
+            fh.truncate(100)
+        (local / "r2.bin").write_bytes(os.urandom(30_000))
+        os.utime(local / "r2.bin", (1_600_000_000, 1_600_000_000))
+        keep = (local / "r3.bin").stat().st_ino
+        ok, msg, _, plan, _ = self.download(rsrc, local, resume=True)
+        self.assertTrue(ok, msg)
+        self.assertEqual(plan["stats"]["resumed"], 2)
+        self.assertEqual(plan["stats"]["files"], 3)
+        for i in range(5):
+            self.assertEqual(sha(local / f"r{i}.bin"), sha(rsrc / f"r{i}.bin"), i)
+        self.assertEqual((local / "r3.bin").stat().st_ino, keep, "complete file untouched")
+
+    def test_tilde_paths_use_device_home(self):
+        tree = self.src / "tilde"
+        (tree / "a").mkdir(parents=True)
+        for i in range(3):
+            (tree / f"a/t{i}.txt").write_text("x" * (10 + i))
+        (RHOME / "inbox").mkdir(exist_ok=True)
+        for dest in ("~/inbox", "~"):
+            ok, msg, _, plan, _ = upload([tree], dest)
+            self.assertTrue(ok, msg)
+            base = RHOME / "inbox" if dest != "~" else RHOME
+            self.assertEqual((base / "tilde/a/t2.txt").read_text(), "x" * 12, dest)
+            self.assertTrue(tr.verify_upload(DEV, plan, 5)[0], dest)
+            dirs = {os.path.dirname(f[1]) or "." for f in plan["files"]}
+            self.assertEqual(tr.apply_resume(plan, tr.remote_listing(DEV, dirs, 5))["resumed"],
+                             3, dest)
+        self.assertEqual(tr.remote_home(DEV, 5), str(RHOME))
+        self.assertIsNotNone(tr.remote_free(DEV, "~", 5))
+        ok, entries = tr.list_remote(DEV, "~", 5)
+        self.assertTrue(ok)
+        self.assertIn("inbox", {e["name"] for e in entries})
+
+    def test_speed_limit(self):
+        f = self.src / "slow.bin"
+        f.write_bytes(os.urandom(3 * 1024 * 1024))
+        dest = self.remote / "slow"
+        dest.mkdir()
+        scan = tr.scan_local([str(f)])
+        plan = tr.plan_upload(scan.items, str(dest), True, False, [])
+        job = tr.SftpJob(DEV, plan["lines"], [f2[2] for f2 in plan["files"]],
+                         limit=tr.limit_kbit(1))
+        loop, out = QtCore.QEventLoop(), {}
+        job.done.connect(lambda ok, msg: (out.update(ok=ok), loop.quit()))
+        t0 = time.monotonic()
+        job.start()
+        loop.exec()
+        took = time.monotonic() - t0
+        self.assertTrue(out["ok"])
+        self.assertGreater(took, 2.0, "3 MB at 1 MB/s must take about 3 s")
+        self.assertEqual(sha(dest / "slow.bin"), sha(f))
 
     def test_cancel_kills_everything(self):
         big = self.src / "big.bin"
@@ -922,6 +1008,68 @@ class GuiBehaviour(unittest.TestCase):
         self.assertTrue(dlg.send_b.isEnabled(), "with resume, checked again later")
         dlg.resume.setChecked(False)
         self.assertFalse(dlg.send_b.isEnabled())
+
+    def test_send_dialog_plans_once(self):
+        f = SANDBOX / "src/once.txt"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text("x")
+        scan = tr.scan_local([str(f)])
+        real = tr.plan_upload
+        with mock.patch.object(tr, "plan_upload", side_effect=real) as spy:
+            dlg = u.SendDialog(self.w, DEV, "~", scan, [], s.DEFAULT_SETTINGS["junk"], 10 ** 9, 2)
+            dlg.skip.setChecked(False)
+            dlg.skip.setChecked(True)
+            dlg._accept("all")
+        self.assertEqual(spy.call_count, 4)  # 3 at open + 1 new combination; rest cached
+        self.assertIn("Speed limit: 2 MB/s", dlg.summary.text())
+
+    def test_settings_dialog(self):
+        dlg = u.SettingsDialog(self.w, s.load_settings())
+        dlg.terminal.setText("no-such-terminal-xyz -e")
+        new, err = dlg.values()
+        self.assertIsNone(new)
+        self.assertIn("not installed", err)
+        dlg.terminal.setText("sh -c")
+        dlg.junk.setPlainText("__pycache__\nsome/path")
+        self.assertIn("is a path", dlg.values()[1])
+        dlg.junk.setPlainText("__pycache__\n*.log")
+        dlg.dl.setText(str(SANDBOX / "nope"))
+        self.assertIn("does not exist", dlg.values()[1])
+        dlg.dl.setText(str(SANDBOX))
+        dlg.speed.setValue(2.5)
+        dlg._save()
+        self.assertEqual(dlg.result_settings["speed_limit_mb_s"], 2.5)
+        self.assertEqual(dlg.result_settings["junk"], ["__pycache__", "*.log"])
+        self.assertEqual(dlg.result_settings["terminal"], ["sh", "-c"])
+        self.assertEqual(s.load_settings()["speed_limit_mb_s"], 2.5)
+        dlg._reset()
+        dlg._save()
+        self.assertEqual(s.load_settings()["junk"], s.DEFAULT_SETTINGS["junk"])
+        self.assertEqual(mode(s.SETTINGS_FILE), 0o600)
+
+    def test_search_filter(self):
+        hosts = [dict(DEV, name="laptop"), dict(DEV, name="raspberry-pi", user="pi"),
+                 dict(DEV, name="nas", host="192.0.2.30")]
+        s.write_private(s.HOSTS_FILE, json.dumps(hosts))
+        w = u.MainWindow()
+        w.show()
+        try:
+            self.assertTrue(w.search.isVisible())
+            shown = lambda: [w.list.itemWidget(w.list.item(i)).d["name"]
+                             for i in range(w.list.count()) if not w.list.item(i).isHidden()]
+            w.search.setText("PI")
+            self.assertEqual(shown(), ["raspberry-pi"])
+            w.search.setText("192.0.2.30")
+            self.assertEqual(shown(), ["nas"])
+            w.search.setText("zzz")
+            self.assertEqual(shown(), [])
+            self.assertIn("Clear the search", w.empty.text())
+            self.assertTrue(w.empty.isVisible())
+            w.search.clear()
+            self.assertEqual(len(shown()), 3)
+        finally:
+            w.close()
+            w.deleteLater()
 
     def test_single_instance(self):
         path = s.RUN_DIR / "test-ui.sock"

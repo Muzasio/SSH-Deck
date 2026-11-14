@@ -301,18 +301,102 @@ def apply_resume(plan: dict, listing: dict[str, dict[str, tuple[int, str]]]) -> 
                 resumed=len(plan["files"]) - len(keep))
 
 
-def plan_download(entries: list[dict], local_dir: str) -> dict:
-    """entries: remote items picked in the browser ({path, name, dir, size})."""
-    lines, sizes = ["progress"], []
+MAX_TREE_DEPTH, MAX_TREE_ENTRIES = 64, 500_000
+
+
+def remote_tree(d: dict, entries: list[dict], timeout: int) -> dict:
+    """Walk the picked remote items, one sftp session per folder level.
+    Returns files [(rel, remote, size, date)], dirs [rel] and counts of skipped links /
+    unsafe names. Links on the device are never followed (same rule as uploads)."""
+    files, dirs = [], []
+    counts = {"links": 0, "badname": 0, "too_deep": 0}
+    level: list[tuple[str, str]] = []  # (rel, remote path) of folders to list
     for e in entries:
         if not valid_name(e["name"]):
-            raise ValueError(f"unsafe name from device: {e['name']!r}")
-        local = os.path.join(local_dir, e["name"])
-        flag = "-R " if e["dir"] else ""
-        lines.append(f"get {flag}{sftp_escape(e['path'])} {sftp_escape(local)}")
-        sizes.append(0 if e["dir"] else e["size"])
-    return {"lines": lines, "sizes": sizes,
-            "known": all(not e["dir"] for e in entries)}
+            counts["badname"] += 1
+        elif e["link"]:
+            counts["links"] += 1
+        elif e["dir"]:
+            dirs.append(e["name"])
+            level.append((e["name"], e["path"]))
+        else:
+            files.append((e["name"], e["path"], e["size"], " ".join(e["date"].split())))
+    depth = 0
+    while level:
+        if depth >= MAX_TREE_DEPTH or len(files) + len(dirs) > MAX_TREE_ENTRIES:
+            counts["too_deep"] += len(level)
+            break
+        r = core.sftp_batch(d, [f"-ls -lan {sftp_escape(rp)}" for _, rp in level],
+                            timeout + len(level) // 2)
+        by_dir: dict[str, list] = {}
+        for line in r.stdout.splitlines():
+            m = LS_RE.match(line)
+            if m:
+                p = m["path"].rstrip("/")
+                by_dir.setdefault(posixpath.dirname(p), []).append((posixpath.basename(p), m))
+        nxt = []
+        for rel, rp in level:
+            for name, m in by_dir.get(rp.rstrip("/"), []):
+                if name in (".", ".."):
+                    continue
+                if not valid_name(name):
+                    counts["badname"] += 1
+                    continue
+                child_rel, child_rp = f"{rel}/{name}", posixpath.join(rp, name)
+                kind = m["perm"][0]
+                if kind == "l":
+                    counts["links"] += 1
+                elif kind == "d":
+                    dirs.append(child_rel)
+                    nxt.append((child_rel, child_rp))
+                elif kind == "-":
+                    files.append((child_rel, child_rp, int(m["size"]),
+                                  " ".join(m["date"].split())))
+        level, depth = nxt, depth + 1
+    return {"files": files, "dirs": dirs, "counts": counts}
+
+
+def _inside_safely(base: str, rel: str) -> bool:
+    """False if any existing part of base/rel (below base) is a symlink."""
+    cur = base
+    for part in rel.split("/"):
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            return False
+    return True
+
+
+def plan_download(tree: dict, local_dir: str, resume: bool) -> dict:
+    """One `get -p` per file (keeps the device's modified time, so a later resume can tell
+    complete files). Local folders are created before the job starts.
+    Resume skips files that exist here with the same size and the same time."""
+    lines, sizes, mkdirs = ["progress"], [], []
+    stats = {"files": 0, "bytes": 0, "resumed": 0, "unsafe": 0}
+    for rel in tree["dirs"]:
+        if _inside_safely(local_dir, rel):
+            mkdirs.append(os.path.join(local_dir, rel))
+        else:
+            stats["unsafe"] += 1
+    for rel, remote, size, date in tree["files"]:
+        local = os.path.join(local_dir, rel)
+        if not _inside_safely(local_dir, rel):
+            stats["unsafe"] += 1
+            continue
+        if resume and os.path.isfile(local):
+            st = os.stat(local)
+            if st.st_size == size and ls_date(st.st_mtime) == date:
+                stats["resumed"] += 1
+                continue
+        lines.append(f"get -p {sftp_escape(remote)} {sftp_escape(local)}")
+        sizes.append(size)
+        stats["files"] += 1
+        stats["bytes"] += size
+    return {"lines": lines, "sizes": sizes, "mkdirs": mkdirs, "stats": stats}
+
+
+def limit_kbit(mb_per_s: float) -> int:
+    """sftp -l takes Kbit/s. 0 = no limit."""
+    return int(round(mb_per_s * 8 * 1024)) if mb_per_s and mb_per_s > 0 else 0
 
 
 # ---------------------------------------------------------------- remote listing
@@ -468,9 +552,11 @@ class SftpJob(QtCore.QObject):
     progress = QtCore.Signal(float, str, str, int)  # fraction (-1 = unknown), file, speed, files done
     done = QtCore.Signal(bool, str)
 
-    def __init__(self, d: dict, lines: list[str], sizes: list[int], parent=None):
+    def __init__(self, d: dict, lines: list[str], sizes: list[int], parent=None,
+                 limit: int = 0):
         super().__init__(parent)
         self.d, self.lines, self.sizes = d, lines, sizes
+        self.limit = limit  # Kbit/s, 0 = no limit
         self.total = sum(sizes)
         self.proc: subprocess.Popen | None = None
         self.master = -1
@@ -487,7 +573,10 @@ class SftpJob(QtCore.QObject):
             batch = self.tmp / "batch"
             core.write_private(batch, "\n".join(self.lines) + "\n")
             cmd = [core.BIN["sftp"], "-F", str(core.SSH_CFG), "-o", "BatchMode=yes",
-                   "-b", str(batch), core.alias(self.d)]
+                   "-b", str(batch)]
+            if self.limit > 0:
+                cmd += ["-l", str(self.limit)]
+            cmd.append(core.alias(self.d))
         except (OSError, ValueError) as e:
             self._cleanup()
             self._end(False, str(e))
