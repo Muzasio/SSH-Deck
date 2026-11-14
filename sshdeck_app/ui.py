@@ -315,12 +315,13 @@ class SendDialog(QtWidgets.QDialog):
         self.skip.setText(f"Skip junk: {junk_n} item(s) like {', '.join(junk[:3])}…")
         self.skip.setVisible(junk_n > 0)
         self.follow = QtWidgets.QCheckBox(
-            f"Also send the files that links point to ({scan.counts['symlinks']} link(s)). "
-            "Links to folders are never followed.")
+            f"Also send the files that links point to ({scan.counts['symlinks']} link(s))")
+        self.follow.setToolTip("Links to files are sent as normal files. Links to folders are "
+                               "never followed.")
         self.follow.setVisible(scan.counts["symlinks"] > 0 and full["links_sent"] > 0)
-        self.resume = QtWidgets.QCheckBox(
-            "Resume: skip files already complete on the device (same size and same time, "
-            "to the minute). Half-sent or changed files are sent again.")
+        self.resume = QtWidgets.QCheckBox("Resume: skip files already complete on the device")
+        self.resume.setToolTip("Complete = same size and same modified time (to the minute).\n"
+                               "Half-sent or changed files are sent again in full.")
         self.resume.setChecked(bool(clash))
         self.resume.setVisible(bool(clash))
         self.space = label("")
